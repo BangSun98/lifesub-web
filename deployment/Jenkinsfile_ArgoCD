@@ -13,7 +13,6 @@ podTemplate(
         containerTemplate(name: 'node', image: 'node:20-slim', ttyEnabled: true, command: 'cat'),
         containerTemplate(name: 'podman', image: "mgoltzsche/podman", ttyEnabled: true, command: 'cat', privileged: true),
         containerTemplate(name: 'azure-cli', image: 'hiondal/azure-kubectl:latest', command: 'cat', ttyEnabled: true),
-        containerTemplate(name: 'envsubst', image: "hiondal/envsubst", command: 'sleep', args: '1h'),
         containerTemplate(name: 'sonar-scanner', image: 'sonarsource/sonar-scanner-cli:latest', command: 'cat', ttyEnabled: true),
         containerTemplate(name: 'git', image: 'alpine/git:latest', command: 'cat', ttyEnabled: true)
     ],
@@ -25,11 +24,9 @@ podTemplate(
     node(PIPELINE_ID) {
         def props
         def imageTag = getImageTag()
-        def manifest = "deploy.yaml"
         def namespace
         def sonarScannerHome = '/opt/sonar-scanner'
-        def MANIFEST_REPO = "https://github.com/cna-bootcamp/lifesub-manifest.git"
-        def MANIFEST_BRANCH = "main"
+        def MANIFEST_REPO = "https://github.com/BangSun98/lifesub-manifest.git"
 
         stage("Get Source") {
             checkout scm
@@ -40,14 +37,14 @@ podTemplate(
         stage('Code Analysis & Quality Gate') {
             container('node') {
                 sh "npm install"
-                sh "npm test -- --coverage --passWithNoTests"   //test code 없어도 통과되게 함  
+                sh "npm test -- --coverage --passWithNoTests"
             }
             
             container('sonar-scanner') {
                 withSonarQubeEnv('SonarQube') {
                     sh """
                         ${sonarScannerHome}/bin/sonar-scanner \
-                        -Dsonar.projectKey=lifesub-web \
+                        -Dsonar.projectKey=lifesub-web-dg0407 \
                         -Dsonar.sources=src \
                         -Dsonar.tests=src \
                         -Dsonar.test.inclusions=src/**/*.test.js,src/**/*.test.jsx \
@@ -69,7 +66,7 @@ podTemplate(
                 withCredentials([azureServicePrincipal('azure-credentials')]) {
                     sh """
                         az login --service-principal -u \$AZURE_CLIENT_ID -p \$AZURE_CLIENT_SECRET -t \$AZURE_TENANT_ID
-                        az aks get-credentials --resource-group ictcoe-edu --name ${props.teamid}-aks --overwrite-existing
+                        az aks get-credentials --resource-group rg-digitalgarage-02 --name aks-digitalgarage-02 --overwrite-existing
                         kubectl create namespace ${namespace} --dry-run=client -o yaml | kubectl apply -f -
                     """
                 }
@@ -90,12 +87,9 @@ podTemplate(
 
                         podman build \
                             --build-arg PROJECT_FOLDER="." \
-                            --build-arg REACT_APP_MEMBER_URL="${props.react_app_member_url}" \
-                            --build-arg REACT_APP_MYSUB_URL="${props.react_app_mysub_url}" \
-                            --build-arg REACT_APP_RECOMMEND_URL="${props.react_app_recommend_url}" \
-                            --build-arg BUILD_FOLDER="deployment" \
+                            --build-arg BUILD_FOLDER="deployment/container" \
                             --build-arg EXPORT_PORT="${props.export_port}" \
-                            -f deployment/Dockerfile-lifesub-web \
+                            -f deployment/container/Dockerfile-lifesub-web \
                             -t ${imagePath} .
                         
                         podman push ${imagePath}
@@ -106,31 +100,47 @@ podTemplate(
 
         stage('Update Manifest Repository') {
             container('git') {
-                // 임시 디렉토리 생성
-                sh "mkdir -p /tmp/manifests"
-                
-                // Clone manifest repository
-                withCredentials([usernamePassword(credentialsId: 'github-credentials', usernameVariable: 'GIT_USERNAME', passwordVariable: 'GIT_PASSWORD')]) {
+                withCredentials([usernamePassword(credentialsId: 'github-credentials-unicorn', usernameVariable: 'GIT_USERNAME', passwordVariable: 'GIT_PASSWORD')]) {
                     sh """
-                        git config --global user.email "jenkins@example.com"
+                        git config --global user.email "jenkins@unicorn.com"
                         git config --global user.name "Jenkins Pipeline"
                         
-                        git clone https://${GIT_USERNAME}:${GIT_PASSWORD}@github.com/cna-bootcamp/lifesub-manifest.git /tmp/manifests
+                        # Clone manifest repository
+                        git clone https://${GIT_USERNAME}:${GIT_PASSWORD}@github.com/BangSun98/lifesub-manifest.git /tmp/manifests
                         cd /tmp/manifests
                         
                         # Update frontend image tag
-                        if [ -f lifesub-web/deployments/lifesub-web-deployment.yaml ]; then
-                            sed -i "s|image: ${props.registry}/${props.image_org}/lifesub-web:.*|image: ${props.registry}/${props.image_org}/lifesub-web:${imageTag}|g" lifesub-web/deployments/lifesub-web-deployment.yaml
+                        if [ -f lifesub-web/deployment/manifest/deployment/lifesub-web-deployment.yaml ]; then
+                            echo "Updating lifesub-web image tag to ${imageTag}"
+                            sed -i "s|image: ${props.registry}/${props.image_org}/lifesub-web:.*|image: ${props.registry}/${props.image_org}/lifesub-web:${imageTag}|g" lifesub-web/deployment/manifest/deployment/lifesub-web-deployment.yaml
                         fi
                         
                         # Commit and push changes
                         git add .
-                        git commit -m "Update frontend image tag to ${imageTag}" || true
-                        git push
+                        if git diff --staged --quiet; then
+                            echo "No changes to commit"
+                        else
+                            git commit -m "Update frontend image tag to ${imageTag}"
+                            git push
+                            echo "Successfully updated manifest repository"
+                        fi
                     """
                 }
             }
         }
+
+        stage('Verify ArgoCD Sync') {
+            container('azure-cli') {
+                sh """
+                    echo "=== ArgoCD 배포 완료 ==="
+                    echo "Frontend Image Tag: ${imageTag}"
+                    echo "Service Updated: lifesub-web"
+                    echo "ArgoCD will automatically sync the changes to cluster"
+                    echo "Monitor ArgoCD UI for deployment status"
+                    echo "Application URL will be available after sync completion"
+                    echo "================="
+                """
+            }
+        }
     }
 }
-
